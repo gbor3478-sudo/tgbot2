@@ -1,7 +1,1 @@
-TMAPI LIVE API Key
 
-Key: ak_live_0hZu6BxAAhuQSAlY4XLnhL2hExe4.2r2OqHhCNEB
-Owner: gbor3478
-Generated: 2026-09-26T09:13:15.474Z
-
-Keep this key secure and never share it publicly.
