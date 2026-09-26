@@ -1,1 +1,47 @@
+name: 1688 bot run
 
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 1688-bot-run
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TMAPI_KEY: ${{ secrets.TMAPI_KEY }}
+          BRANDS_LIST: ${{ secrets.BRANDS_LIST }}
+          MAX_PRICE_CNY: ${{ secrets.MAX_PRICE_CNY }}
+          MIN_RATING: ${{ secrets.MIN_RATING }}
+          MIN_REVIEWS: ${{ secrets.MIN_REVIEWS }}
+        run: python main.py
+
+      - name: Save bot state
+        run: |
+          git config user.name "1688-bot"
+          git config user.email "actions@github.com"
+          git add seen_items.json state.json || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "update bot state [skip ci]"
+          git push || true
