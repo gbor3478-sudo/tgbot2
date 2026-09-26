@@ -32,7 +32,9 @@ SEEN_FILE = Path(__file__).parent / "seen_items.json"
 
 
 def env(name: str, default=None, required: bool = False):
-    val = os.environ.get(name, default)
+    val = os.environ.get(name)
+    if not val:
+        val = default
     if required and not val:
         log.error("Не задана обязательная переменная окружения: %s", name)
         sys.exit(1)
