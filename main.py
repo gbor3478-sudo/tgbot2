@@ -1,10 +1,14 @@
 """
-1688 Telegram Bot
-Ищет товары на 1688.com через провайдера данных, фильтрует по цене/качеству/отзывам
-и присылает подборку в Telegram.
+1688 Telegram Bot — интерактивная версия.
 
-Запуск: python main.py
-Настройки — через переменные окружения (см. README.md).
+При каждом запуске:
+1. забирает новые сообщения/нажатия кнопок из Telegram и обрабатывает команды
+   (/addquery, /removequery, /brand, /setbrand, /search и т.д.) — см. bot_commands.py;
+2. выполняет плановый поиск по сохранённому списку запросов (с учётом бренда)
+   и присылает новые подходящие товары.
+
+Всё состояние (запросы, бренд, оффсет апдейтов, уже отправленные товары)
+хранится в JSON-файлах в репозитории и коммитится обратно workflow'ом.
 """
 
 import os
@@ -13,9 +17,10 @@ import json
 import logging
 from pathlib import Path
 
-import requests
-
 from providers.tmapi import Tmapi1688Provider
+from telegram_client import TelegramClient
+from state import load_state, save_state
+import bot_commands
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,10 +28,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("1688-bot")
 
-STATE_FILE = Path(__file__).parent / "seen_items.json"
+SEEN_FILE = Path(__file__).parent / "seen_items.json"
 
-
-# ---------- Конфиг из переменных окружения ----------
 
 def env(name: str, default=None, required: bool = False):
     val = os.environ.get(name, default)
@@ -40,51 +43,34 @@ TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID = env("TELEGRAM_CHAT_ID", required=True)
 TMAPI_KEY = env("TMAPI_KEY", required=True)
 
-# Что искать. Можно задать несколько запросов через ';'
-SEARCH_QUERIES = [q.strip() for q in env("SEARCH_QUERIES", "").split(";") if q.strip()]
+# Необязательно: кнопки для /brand, через запятую
+BRANDS_LIST = [b.strip() for b in env("BRANDS_LIST", "").split(",") if b.strip()]
 
-# Пороги качества — разумные значения по умолчанию, можно переопределить в secrets/env
-MAX_PRICE_CNY = float(env("MAX_PRICE_CNY", "150"))          # максимальная цена в юанях
-MIN_RATING = float(env("MIN_RATING", "4.6"))                 # мин. рейтинг магазина/товара (из 5)
-MIN_REVIEWS = int(env("MIN_REVIEWS", "200"))                 # мин. число отзывов/продаж
+# Пороги качества
+MAX_PRICE_CNY = float(env("MAX_PRICE_CNY", "150"))
+MIN_RATING = float(env("MIN_RATING", "4.6"))
+MIN_REVIEWS = int(env("MIN_REVIEWS", "200"))
 MAX_RESULTS_PER_QUERY = int(env("MAX_RESULTS_PER_QUERY", "5"))
-TOP_PERCENT_CHEAPEST = float(env("TOP_PERCENT_CHEAPEST", "30"))  # оставляем самые дешёвые X% из отфильтрованных
+TOP_PERCENT_CHEAPEST = float(env("TOP_PERCENT_CHEAPEST", "30"))
 
 
-# ---------- Хранение уже отправленных товаров (чтобы не дублировать) ----------
+# ---------- seen items ----------
 
 def load_seen() -> set:
-    if STATE_FILE.exists():
+    if SEEN_FILE.exists():
         try:
-            return set(json.loads(STATE_FILE.read_text(encoding="utf-8")))
+            return set(json.loads(SEEN_FILE.read_text(encoding="utf-8")))
         except Exception:
             return set()
     return set()
 
 
 def save_seen(seen: set):
-    # ограничиваем размер файла, чтобы не рос бесконечно
     trimmed = list(seen)[-5000:]
-    STATE_FILE.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+    SEEN_FILE.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------- Telegram ----------
-
-def send_telegram_message(text: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-        },
-        timeout=20,
-    )
-    if not resp.ok:
-        log.error("Ошибка отправки в Telegram: %s %s", resp.status_code, resp.text)
-
+# ---------- форматирование и фильтрация ----------
 
 def format_item_message(item: dict) -> str:
     title = item.get("title", "Без названия")
@@ -104,13 +90,9 @@ def format_item_message(item: dict) -> str:
     if url:
         lines.append(f"🔗 {url}")
     if img:
-        # ссылку на картинку просто добавляем отдельной строкой —
-        # Telegram сам покажет превью, если разрешено
         lines.append(img)
     return "\n".join(lines)
 
-
-# ---------- Фильтрация ----------
 
 def passes_quality_bar(item: dict) -> bool:
     price = item.get("price")
@@ -127,7 +109,6 @@ def passes_quality_bar(item: dict) -> bool:
 
 
 def rank_and_trim(items: list) -> list:
-    """Из прошедших порог качества берём самые дешёвые TOP_PERCENT_CHEAPEST%."""
     if not items:
         return []
     items_sorted = sorted(items, key=lambda x: x.get("price", float("inf")))
@@ -135,41 +116,60 @@ def rank_and_trim(items: list) -> list:
     return items_sorted[:keep_n][:MAX_RESULTS_PER_QUERY]
 
 
-# ---------- Основной цикл ----------
+# ---------- поиск ----------
 
-def main():
-    if not SEARCH_QUERIES:
-        log.error(
-            "SEARCH_QUERIES пуст. Задайте, что искать, например: "
-            "'спортивная сумка;термос;наушники' в secrets/переменных окружения."
-        )
-        sys.exit(1)
+def make_search_runner(provider: Tmapi1688Provider, client: TelegramClient, seen: set):
+    """Возвращает функцию run_search(query) -> list, которая ищет, фильтрует,
+    шлёт новые товары в Telegram и помечает их как отправленные."""
 
-    provider = Tmapi1688Provider(api_key=TMAPI_KEY)
-    seen = load_seen()
-    total_sent = 0
-
-    for query in SEARCH_QUERIES:
-        log.info("Ищу: %s", query)
+    def run_search(query: str) -> list:
         try:
             raw_items = provider.search(query, limit=50)
         except Exception as e:
             log.error("Ошибка поиска по запросу '%s': %s", query, e)
-            continue
+            return []
 
         good = [i for i in raw_items if passes_quality_bar(i)]
         picked = rank_and_trim(good)
 
+        sent = []
         for item in picked:
             item_id = item.get("id") or item.get("url")
             if not item_id or item_id in seen:
                 continue
-            send_telegram_message(format_item_message(item))
+            client.send_message(format_item_message(item))
             seen.add(item_id)
-            total_sent += 1
+            sent.append(item)
+        return sent
+
+    return run_search
+
+
+def main():
+    provider = Tmapi1688Provider(api_key=TMAPI_KEY)
+    client = TelegramClient(token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+    state = load_state()
+    seen = load_seen()
+
+    run_search = make_search_runner(provider, client, seen)
+
+    # 1. обработать новые команды/кнопки из Telegram
+    state = bot_commands.handle_updates(state, client, BRANDS_LIST, run_search)
+
+    # 2. плановый поиск по сохранённому списку запросов
+    queries = bot_commands.effective_queries(state)
+    if not queries:
+        log.info("Список запросов пуст — плановый поиск пропущен. Добавьте через /addquery в Telegram.")
+    else:
+        total_sent = 0
+        for query in queries:
+            log.info("Плановый поиск: %s", query)
+            sent = run_search(query)
+            total_sent += len(sent)
+        log.info("Плановый поиск завершён, отправлено новых товаров: %d", total_sent)
 
     save_seen(seen)
-    log.info("Готово. Отправлено новых товаров: %d", total_sent)
+    save_state(state)
 
 
 if __name__ == "__main__":
