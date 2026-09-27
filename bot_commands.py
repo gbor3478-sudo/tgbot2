@@ -5,8 +5,11 @@
   /addquery <текст>      — добавить запрос в постоянный список
   /removequery <номер>   — убрать запрос по номеру из /queries
   /queries               — показать текущий список запросов и бренд
-  /brand                 — показать кнопки с брендами (из BRANDS_LIST) для выбора
-  /setbrand <текст>      — задать бренд вручную (если своего варианта нет в кнопках)
+  /addbrand <текст>      — добавить свой бренд в список для кнопок /brand
+  /removebrand <номер>   — убрать бренд по номеру из /brands
+  /brands                — показать сохранённые бренды
+  /brand                 — показать кнопки с брендами (свои + из BRANDS_LIST) для выбора
+  /setbrand <текст>      — задать бренд вручную, не добавляя его в сохранённые
   /clearbrand            — сбросить бренд (искать без привязки к бренду)
   /search <текст>        — разовый поиск прямо сейчас, без сохранения в список
 
@@ -18,14 +21,19 @@ import logging
 
 log = logging.getLogger("1688-bot.commands")
 
+BRAND_ICONS = ["🏷️", "⭐", "💎", "🔥", "✨", "🎯", "🚀", "🛍️", "👑", "💠"]
+
 HELP_TEXT = (
     "Я ищу товары на 1688.com по вашим запросам.\n\n"
     "<b>Команды:</b>\n"
     "/addquery &lt;текст&gt; — добавить запрос в постоянный поиск\n"
     "/removequery &lt;номер&gt; — убрать запрос (номер из /queries)\n"
     "/queries — показать список запросов и текущий бренд\n"
-    "/brand — выбрать бренд кнопками\n"
-    "/setbrand &lt;текст&gt; — задать свой бренд текстом\n"
+    "/addbrand &lt;текст&gt; — добавить свой бренд (появится кнопкой в /brand)\n"
+    "/removebrand &lt;номер&gt; — убрать бренд (номер из /brands)\n"
+    "/brands — показать сохранённые бренды\n"
+    "/brand — выбрать бренд кнопками с иконками\n"
+    "/setbrand &lt;текст&gt; — разовый бренд текстом, не сохраняя в список\n"
     "/clearbrand — искать без привязки к бренду\n"
     "/search &lt;текст&gt; — разовый поиск прямо сейчас"
 )
@@ -38,6 +46,18 @@ def effective_queries(state: dict) -> list:
     if not brand:
         return list(queries)
     return [f"{brand} {q}" for q in queries]
+
+
+def combined_brands(state: dict, brands_list: list) -> list:
+    """Свои сохранённые бренды (/addbrand) + бренды из secret BRANDS_LIST, без дублей."""
+    own = state.get("brands", [])
+    seen = set()
+    result = []
+    for b in list(own) + list(brands_list):
+        if b not in seen:
+            seen.add(b)
+            result.append(b)
+    return result
 
 
 def handle_updates(state: dict, client, brands_list: list, run_search_fn, poll_timeout: int = 0):
@@ -103,6 +123,7 @@ def _handle_callback(callback, state: dict, client):
 
 KNOWN_COMMANDS = (
     "/start", "/help", "/addquery", "/removequery", "/queries",
+    "/addbrand", "/removebrand", "/brands",
     "/brand", "/setbrand", "/clearbrand", "/search",
 )
 
@@ -163,15 +184,70 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
             lines.append("Список запросов пуст. Добавьте: /addquery термос")
         client.send_message("\n".join(lines))
 
-    elif cmd == "/brand":
-        if not brands_list:
+    elif cmd == "/addbrand":
+        if not arg:
             client.send_message(
-                "⚠️ Список брендов для кнопок не настроен (secret BRANDS_LIST пуст или отсутствует).\n"
-                "Задайте бренд текстом: /setbrand Nike"
+                "❗️ Не хватает названия бренда.\n"
+                "Формат: /addbrand &lt;бренд&gt;\n"
+                "Пример: /addbrand Nike"
             )
             return
-        buttons = [(b, f"brand:{b}") for b in brands_list]
-        buttons.append(("Без бренда", "brand:__none__"))
+        state.setdefault("brands", [])
+        if arg in state["brands"]:
+            client.send_message(f"⚠️ Бренд «{arg}» уже сохранён (см. /brands).")
+        else:
+            state["brands"].append(arg)
+            client.send_message(f"✅ Бренд добавлен: <b>{arg}</b> — теперь он есть в /brand")
+
+    elif cmd == "/removebrand":
+        brands = state.get("brands", [])
+        if not brands:
+            client.send_message("⚠️ Список сохранённых брендов пуст. Добавьте: /addbrand Nike")
+            return
+        if not arg:
+            client.send_message(
+                "❗️ Не хватает номера.\n"
+                "Формат: /removebrand &lt;номер&gt;\n"
+                f"Посмотреть номера: /brands (сейчас их {len(brands)})"
+            )
+            return
+        if not arg.isdigit():
+            client.send_message(f"❗️ «{arg}» — это не число. Нужен номер из списка /brands, например: /removebrand 2")
+            return
+        n = int(arg)
+        if not (1 <= n <= len(brands)):
+            client.send_message(f"❗️ Номера {n} нет в списке — доступны от 1 до {len(brands)} (см. /brands).")
+            return
+        removed = brands.pop(n - 1)
+        if state.get("brand") == removed:
+            state["brand"] = None
+        client.send_message(f"✅ Убран бренд: <b>{removed}</b>")
+
+    elif cmd == "/brands":
+        brands = state.get("brands", [])
+        current = state.get("brand")
+        lines = [f"Текущий бренд: <b>{current or '— не задан —'}</b>", ""]
+        if brands:
+            lines.append("Сохранённые бренды:")
+            lines += [f"{i+1}. {b}" for i, b in enumerate(brands)]
+        else:
+            lines.append("Сохранённых брендов пока нет. Добавьте: /addbrand Nike")
+        client.send_message("\n".join(lines))
+
+    elif cmd == "/brand":
+        brands = combined_brands(state, brands_list)
+        if not brands:
+            client.send_message(
+                "⚠️ Брендов пока нет.\n"
+                "Добавьте свой: /addbrand Nike\n"
+                "Или задайте разовый текстом: /setbrand Nike"
+            )
+            return
+        buttons = [
+            (f"{BRAND_ICONS[i % len(BRAND_ICONS)]} {b}", f"brand:{b}")
+            for i, b in enumerate(brands)
+        ]
+        buttons.append(("🚫 Без бренда", "brand:__none__"))
         markup = client.build_keyboard(buttons, columns=2)
         client.send_message("Выберите бренд:", reply_markup=markup)
 
@@ -229,3 +305,13 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
             "Все команды начинаются со слэша, например /addquery термос.\n"
             "Список команд — /help."
         )
+
+Плюс маленькая правка в state.py — добавьте поле "brands": [] в DEFAULT_STATE:
+
+python
+DEFAULT_STATE = {
+    "update_offset": 0,   # id последнего обработанного Telegram-апдейта
+    "brand": None,         # текущий выбранный бренд (или None)
+    "brands": [],           # свои сохранённые бренды, добавленные через /addbrand
+    "queries": [],          # список активных поисковых запросов (строки)
+}
