@@ -12,7 +12,8 @@ STATE_FILE = Path(__file__).parent / "state.json"
 
 DEFAULT_STATE = {
     "update_offset": 0,   # id последнего обработанного Telegram-апдейта
-    "brand": None,        # текущий выбранный бренд (или None)
+    "brand": None,         # текущий выбранный бренд (или None)
+    "brands": [],          # свои сохранённые бренды, добавленные через /addbrand
     "queries": [],         # список активных поисковых запросов (строки)
 }
 
