@@ -39,6 +39,7 @@ def effective_queries(state: dict) -> list:
         return list(queries)
     return [f"{brand} {q}" for q in queries]
 
+
 def handle_updates(state: dict, client, brands_list: list, run_search_fn, poll_timeout: int = 0):
     """
     Забирает новые апдейты из Telegram, обрабатывает команды, обновляет state.
@@ -48,6 +49,24 @@ def handle_updates(state: dict, client, brands_list: list, run_search_fn, poll_t
     Возвращает обновлённый state.
     """
     updates = client.get_updates(offset=state.get("update_offset", 0) + 1, timeout=poll_timeout)
+
+    for update in updates:
+        state["update_offset"] = max(state.get("update_offset", 0), update["update_id"])
+
+        if "callback_query" in update:
+            _handle_callback(update["callback_query"], state, client)
+            continue
+
+        message = update.get("message") or update.get("edited_message")
+        if not message:
+            continue
+        text = (message.get("text") or "").strip()
+        if not text:
+            continue
+
+        _handle_text_command(text, state, client, brands_list, run_search_fn)
+
+    return state
 
 
 def _handle_callback(callback, state: dict, client):
