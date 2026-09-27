@@ -2,11 +2,13 @@ name: 1688 bot run
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # подстраховка на случай, если цепочка самоперезапусков где-то оборвётся
+    - cron: "0 */6 * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: write
+  actions: write   # нужно, чтобы job мог сам себя перезапустить через gh CLI
 
 concurrency:
   group: 1688-bot-run
@@ -15,6 +17,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # чуть меньше максимума в 360, чтобы успеть сохранить состояние
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run bot (continuous loop ~5h40m)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -36,12 +39,22 @@ jobs:
           MAX_PRICE_CNY: ${{ secrets.MAX_PRICE_CNY }}
           MIN_RATING: ${{ secrets.MIN_RATING }}
           MIN_REVIEWS: ${{ secrets.MIN_REVIEWS }}
+          LOOP_SECONDS: "20400"
+          POLL_TIMEOUT_SECONDS: "25"
+          SEARCH_INTERVAL_SECONDS: "1800"
         run: python main.py
 
       - name: Save bot state
+        if: always()
         run: |
           git config user.name "1688-bot"
           git config user.email "actions@github.com"
           git add seen_items.json state.json || true
           git diff --quiet && git diff --staged --quiet || git commit -m "update bot state [skip ci]"
           git push || true
+
+      - name: Relaunch immediately
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.RELAUNCH_TOKEN }}
+        run: gh workflow run run.yml --ref ${{ github.ref_name }}
