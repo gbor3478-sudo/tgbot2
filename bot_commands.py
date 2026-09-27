@@ -53,18 +53,32 @@ def handle_updates(state: dict, client, brands_list: list, run_search_fn, poll_t
     for update in updates:
         state["update_offset"] = max(state.get("update_offset", 0), update["update_id"])
 
-        if "callback_query" in update:
-            _handle_callback(update["callback_query"], state, client)
-            continue
+        try:
+            if "callback_query" in update:
+                _handle_callback(update["callback_query"], state, client)
+                continue
 
-        message = update.get("message") or update.get("edited_message")
-        if not message:
-            continue
-        text = (message.get("text") or "").strip()
-        if not text:
-            continue
+            message = update.get("message") or update.get("edited_message")
+            if not message:
+                continue
+            text = (message.get("text") or "").strip()
+            if not text:
+                client.send_message(
+                    "Я понимаю только текстовые команды. Наберите /help, чтобы увидеть список."
+                )
+                continue
 
-        _handle_text_command(text, state, client, brands_list, run_search_fn)
+            _handle_text_command(text, state, client, brands_list, run_search_fn)
+
+        except Exception as e:
+            log.exception("Ошибка при обработке апдейта %s: %s", update.get("update_id"), e)
+            try:
+                client.send_message(
+                    f"⚠️ Произошла ошибка при обработке вашего сообщения: {e}\n"
+                    "Попробуйте ещё раз или наберите /help."
+                )
+            except Exception:
+                pass
 
     return state
 
@@ -87,6 +101,12 @@ def _handle_callback(callback, state: dict, client):
         client.answer_callback_query(cq_id)
 
 
+KNOWN_COMMANDS = (
+    "/start", "/help", "/addquery", "/removequery", "/queries",
+    "/brand", "/setbrand", "/clearbrand", "/search",
+)
+
+
 def _handle_text_command(text: str, state: dict, client, brands_list: list, run_search_fn):
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
@@ -97,22 +117,40 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
 
     elif cmd == "/addquery":
         if not arg:
-            client.send_message("Укажите, что искать: /addquery термос")
+            client.send_message(
+                "❗️ Не хватает текста запроса.\n"
+                "Формат: /addquery &lt;что искать&gt;\n"
+                "Пример: /addquery термос"
+            )
             return
         state.setdefault("queries", [])
         if arg in state["queries"]:
-            client.send_message("Такой запрос уже есть в списке.")
+            client.send_message(f"⚠️ Запрос «{arg}» уже есть в списке (см. /queries).")
         else:
             state["queries"].append(arg)
-            client.send_message(f"Добавлено: <b>{arg}</b>")
+            client.send_message(f"✅ Добавлено: <b>{arg}</b>")
 
     elif cmd == "/removequery":
         queries = state.get("queries", [])
-        if not arg.isdigit() or not (1 <= int(arg) <= len(queries)):
-            client.send_message("Укажите номер из списка /queries, например: /removequery 2")
+        if not queries:
+            client.send_message("⚠️ Список запросов пуст — удалять нечего. Добавьте: /addquery термос")
             return
-        removed = queries.pop(int(arg) - 1)
-        client.send_message(f"Убрано: <b>{removed}</b>")
+        if not arg:
+            client.send_message(
+                "❗️ Не хватает номера.\n"
+                "Формат: /removequery &lt;номер&gt;\n"
+                f"Посмотреть номера: /queries (сейчас их {len(queries)})"
+            )
+            return
+        if not arg.isdigit():
+            client.send_message(f"❗️ «{arg}» — это не число. Нужен номер из списка /queries, например: /removequery 2")
+            return
+        n = int(arg)
+        if not (1 <= n <= len(queries)):
+            client.send_message(f"❗️ Номера {n} нет в списке — доступны от 1 до {len(queries)} (см. /queries).")
+            return
+        removed = queries.pop(n - 1)
+        client.send_message(f"✅ Убрано: <b>{removed}</b>")
 
     elif cmd == "/queries":
         queries = state.get("queries", [])
@@ -128,7 +166,7 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
     elif cmd == "/brand":
         if not brands_list:
             client.send_message(
-                "Список брендов для кнопок не настроен (secret BRANDS_LIST).\n"
+                "⚠️ Список брендов для кнопок не настроен (secret BRANDS_LIST пуст или отсутствует).\n"
                 "Задайте бренд текстом: /setbrand Nike"
             )
             return
@@ -139,30 +177,55 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
 
     elif cmd == "/setbrand":
         if not arg:
-            client.send_message("Укажите бренд: /setbrand Nike")
+            client.send_message(
+                "❗️ Не хватает названия бренда.\n"
+                "Формат: /setbrand &lt;бренд&gt;\n"
+                "Пример: /setbrand Nike"
+            )
             return
         state["brand"] = arg
-        client.send_message(f"Бренд установлен: <b>{arg}</b>")
+        client.send_message(f"✅ Бренд установлен: <b>{arg}</b>")
 
     elif cmd == "/clearbrand":
+        if not state.get("brand"):
+            client.send_message("ℹ️ Бренд и так не задан.")
+            return
         state["brand"] = None
-        client.send_message("Бренд сброшен — ищу без привязки к бренду.")
+        client.send_message("✅ Бренд сброшен — ищу без привязки к бренду.")
 
     elif cmd == "/search":
         if not arg:
-            client.send_message("Укажите, что искать: /search термос")
+            client.send_message(
+                "❗️ Не хватает текста запроса.\n"
+                "Формат: /search &lt;что искать&gt;\n"
+                "Пример: /search термос"
+            )
             return
         brand = state.get("brand")
         full_query = f"{brand} {arg}" if brand else arg
-        client.send_message(f"Ищу: <b>{full_query}</b> …")
+        client.send_message(f"🔎 Ищу: <b>{full_query}</b> …")
         try:
             results = run_search_fn(full_query)
         except Exception as e:
             log.error("Ошибка разового поиска: %s", e)
-            client.send_message("Не получилось выполнить поиск, попробуйте позже.")
+            client.send_message(f"⚠️ Не получилось выполнить поиск: {e}")
             return
         if not results:
-            client.send_message("Ничего подходящего не нашлось под текущие пороги качества.")
+            client.send_message(
+                "😕 Ничего подходящего не нашлось под текущие пороги качества "
+                "(цена/рейтинг/отзывы) — попробуйте другой запрос."
+            )
+
+    elif cmd.startswith("/"):
+        client.send_message(
+            f"❓ Не знаю команду «{cmd}».\n"
+            f"Доступные команды: {', '.join(KNOWN_COMMANDS)}.\n"
+            "Подробности — /help."
+        )
 
     else:
-        client.send_message("Не знаю такую команду. Наберите /help.")
+        client.send_message(
+            f"❓ Не поняла сообщение «{text}» — это не похоже на команду.\n"
+            "Все команды начинаются со слэша, например /addquery термос.\n"
+            "Список команд — /help."
+        )
