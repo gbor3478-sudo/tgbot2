@@ -305,13 +305,3 @@ def _handle_text_command(text: str, state: dict, client, brands_list: list, run_
             "Все команды начинаются со слэша, например /addquery термос.\n"
             "Список команд — /help."
         )
-
-Плюс маленькая правка в state.py — добавьте поле "brands": [] в DEFAULT_STATE:
-
-python
-DEFAULT_STATE = {
-    "update_offset": 0,   # id последнего обработанного Telegram-апдейта
-    "brand": None,         # текущий выбранный бренд (или None)
-    "brands": [],           # свои сохранённые бренды, добавленные через /addbrand
-    "queries": [],          # список активных поисковых запросов (строки)
-}
