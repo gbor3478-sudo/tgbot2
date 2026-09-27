@@ -1,6 +1,8 @@
 {
-  "update_offset": 835617106,
+  "update_offset": 835617107,
   "brand": "stone island",
-  "brands": [],
+  "brands": [
+    "Stone Island"
+  ],
   "queries": []
 }
